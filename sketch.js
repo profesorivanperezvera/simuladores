@@ -1,5 +1,5 @@
 /* Rebote inelástico — ping-pong (p5.js)
-   Panel izquierdo: simulación
+   Panel izquierdo: simulación (altura vs tiempo real)
    Panel derecho : gráfica h(t)
    Barra superior: ▶/❚❚  ↺  ↑  ↓ (ajustan r)
    Controles: [ESPACIO]=Play/Pause, R=Reset, ↑/↓=r ±0.01
@@ -10,7 +10,11 @@ let ppm = 110;      // píxeles por metro
 let g   = 9.81;     // m/s²
 let r   = 0.90;     // coef. restitución típico ping-pong
 let h0  = 1.40;     // altura inicial (m)
-let radio = 0.02;   // m
+// Nota: radio aumentado solo para que se vea mejor en pantalla
+let radio = 0.05;   // m (ping-pong real ~0.02 m)
+
+// Altura máxima que se marca en el eje del panel de simulación
+let H_AXIS_MAX = 2.0; // metros
 
 // -------- Estado --------
 let running = false;
@@ -41,7 +45,7 @@ function setup(){
   createCanvas(900, 560);
   layout();
   initButtons();
-  groundY = panelSim.y + panelSim.h - 10;
+  groundY = panelSim.y + panelSim.h - 40; // suelo un poco más arriba para ver la franja
   resetSim();
 }
 
@@ -76,7 +80,7 @@ function initButtons(){
 
 // -------- Reset Física --------
 function resetSim(){
-  ball.x = panelSim.x + panelSim.w * 0.30;
+  ball.x = panelSim.x + panelSim.w * 0.45;
   ball.y = yFromMeters(h0);
   ball.vy = 0;
   running = false;
@@ -155,29 +159,90 @@ function drawTopBar(hCurrent){
 
 // -------- Panel Simulación --------
 function drawSimPanel(){
-  noStroke(); fill(255);
+  noStroke(); 
+  fill(255);
   rect(panelSim.x, panelSim.y, panelSim.w, panelSim.h, 18);
 
-  stroke(225);
-  line(panelSim.x+10, groundY, panelSim.x+panelSim.w-10, groundY);
+  // Ejes y rejilla de alturas
+  drawSimAxes();
 
-  // sombra
+  // Suelo como franja
+  let simBottom = panelSim.y + panelSim.h;
+  noStroke();
+  fill(245);
+  rect(panelSim.x+8, groundY, panelSim.w-16, simBottom-groundY, 10);
+  stroke(180);
+  strokeWeight(2);
+  line(panelSim.x+20, groundY, panelSim.x+panelSim.w-20, groundY);
+  strokeWeight(1);
+
+  // Tiempo en el panel (además de la barra)
+  noStroke();
+  fill(0,140);
+  textSize(11);
+  textAlign(LEFT, TOP);
+  text("t = " + nf(tNow,1,2) + " s", panelSim.x + 18, panelSim.y + 12);
+
+  // sombra de la pelota
   let rpx = metersToPixels(radio);
   let dist = max(0, groundY - (ball.y + rpx));
   let s = map(dist, 0, 240, 1.6, 0.25);
-  noStroke(); fill(0,30);
-  ellipse(ball.x + 10, groundY + 6, rpx*2.2*s, rpx*0.9*s);
+  noStroke(); 
+  fill(0,30);
+  ellipse(ball.x + 12, groundY + 6, rpx*2.4*s, rpx*0.9*s);
 
-  // pelota
-  stroke(40); fill(255,180,0);
-  ellipse(ball.x, ball.y, rpx*2, rpx*2);
-  noFill(); stroke(255,255,255,150);
-  arc(ball.x, ball.y, rpx*1.6, rpx*1.6, -PI/6, PI/2);
+  // pelota (más grande visualmente)
+  stroke(40); 
+  fill(255,180,0);
+  ellipse(ball.x, ball.y, rpx*2.2, rpx*2.2);
+  noFill(); 
+  stroke(255,255,255,150);
+  arc(ball.x, ball.y, rpx*1.8, rpx*1.8, -PI/6, PI/2);
+}
+
+// Dibuja el eje de alturas y la rejilla del panel de simulación
+function drawSimAxes(){
+  let axisX = panelSim.x + 40;
+  let simTop = panelSim.y + 16;
+  let simBottom = panelSim.y + panelSim.h;
+
+  // eje vertical
+  stroke(120);
+  line(axisX, simTop, axisX, groundY);
+
+  // marcas de altura
+  textSize(11);
+  textAlign(RIGHT, CENTER);
+  for (let hTick = 0; hTick <= H_AXIS_MAX + 0.0001; hTick += 0.5){
+    let yTick = yFromMeters(hTick);
+    if (yTick < simTop || yTick > simBottom) continue;
+
+    // línea horizontal suave
+    stroke(230);
+    line(axisX+2, yTick, panelSim.x + panelSim.w - 18, yTick);
+
+    // marca corta y etiqueta
+    stroke(120);
+    line(axisX-4, yTick, axisX, yTick);
+    noStroke();
+    fill(0,150);
+    text(nf(hTick,1,1), axisX-6, yTick);
+  }
+
+  // etiqueta eje
+  push();
+  translate(axisX-24, (simTop+groundY)/2);
+  rotate(-HALF_PI);
+  textAlign(CENTER, CENTER);
+  fill(0,160);
+  text("altura h (m)", 0, 0);
+  pop();
 }
 
 // -------- Panel del Gráfico --------
 function drawPlotPanel(){
-  noStroke(); fill(255);
+  noStroke(); 
+  fill(255);
   rect(panelPlot.x, panelPlot.y, panelPlot.w, panelPlot.h, 18);
 
   let left = panelPlot.x + 50;
@@ -194,8 +259,10 @@ function drawPlotPanel(){
   line(left, bottom, right, bottom);
   strokeWeight(1);
 
-  fill(0); noStroke();
-  textAlign(CENTER, TOP); text("x: tiempo (s)", (left+right)/2, bottom+6);
+  fill(0); 
+  noStroke();
+  textAlign(CENTER, TOP); 
+  text("x: tiempo (s)", (left+right)/2, bottom+6);
 
   push();
   translate(left-30, (top+bottom)/2);
@@ -210,7 +277,8 @@ function drawPlotPanel(){
   maxHSeen = lerp(maxHSeen, max(hmax, 0.2), 0.08);
   let yscale = (bottom - top) / max(0.15, maxHSeen*1.15);
 
-  noFill(); stroke(0);
+  noFill(); 
+  stroke(0);
   beginShape();
   for (let k=0;k<N;k++){
     let i = (idx + k) % N;
