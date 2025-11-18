@@ -1,253 +1,335 @@
-// ===================== CONFIGURACIÓN GLOBAL (limpia) =====================
-let W = 800, H = 500;
-let SIM_PANEL_W = 400, GRAPH_PANEL_W = 400;
+/* Rebote inelástico — ping-pong (p5.js)
+   Panel izquierdo: simulación
+   Panel derecho : gráfica h(t)
+   Barra superior: ▶/❚❚  ↺  ↑  ↓ (ajustan r)
+   Controles: [ESPACIO]=Play/Pause, R=Reset, ↑/↓=r ±0.01
+*/
 
-// ====== Constantes físicas (teóricas) ======
-const RADIO_CM = 2.0;       // ping-pong (⌀ 40 mm)
-const G_CM_S2   = 981.0;    // gravedad Tierra
-const R_COR     = 0.90;     // coef. restitución ping-pong en superficie rígida
+// -------- Parámetros físicos --------
+let ppm = 110;      // píxeles por metro
+let g   = 9.81;     // m/s²
+let r   = 0.90;     // coef. restitución típico ping-pong
+let h0  = 1.40;     // altura inicial (m)
+let radio = 0.02;   // m
 
-// ====== Unidades de estado (en cm / s) ======
-let alturaSimulacion_cm = 100.0;   // ajustable por slider
-let alturaDePartida_cm  = 90.0;    // ajustable por slider
-let y_cm, vy_cm_s = 0;
-let tiempoSimulado_s = 0;
+// -------- Estado --------
+let running = false;
+let groundY;
+let ball = { x:0, y:0, vy:0 };
+let lastMS = 0;
+let bounceCount = 0;
 
-// ====== Conversión dibujo ======
-let pxPorCM, radio_px;
+// Para detectar picos y estimar r_exp
+let prevVy = 0;
+let peakHeights = [];
+let rEst = null;
 
-// ====== Sim ======
-let simulacionPausada = false;
-let ventanaTiempo_s = 5.0;
-let historialDatos = [];
+// -------- Layout / UI --------
+let PAD = 16;
+let topBar, panelSim, panelPlot;
+let btnPlayPause, btnReset, btnRUp, btnRDown;
 
-// ====== UI (p5 DOM) ======
-let ui = {};
-let uiWrap, uiTopBar, uiSliders;
+// -------- Buffer de señal h(t) --------
+let N = 600;
+let tbuf = Array(N).fill(-1);
+let hbuf = Array(N).fill(0);
+let idx = 0, tNow = 0, plotTWindow = 10;
+let maxHSeen = 0;
 
-// ===================== SETUP =====================
-function setup() {
-  const cnv = createCanvas(W, H);
-  frameRate(60);
-  ellipseMode(RADIUS);
-  textFont('Arial');
-
-  recalcularEscala();
-  reiniciarSimulacion();
-
-  // ---------- UI limpia ----------
-  // Contenedor
-  uiWrap = createDiv().style('position','absolute')
-                      .style('width', (GRAPH_PANEL_W - 24)+'px')
-                      .style('padding','10px')
-                      .style('border','1px solid #ddd')
-                      .style('border-radius','12px')
-                      .style('background','#fff')
-                      .style('box-shadow','0 4px 12px rgba(0,0,0,.08)')
-                      .style('font-family','Arial, sans-serif')
-                      .style('font-size','13px');
-
-  // Posición arriba del panel derecho
-  const pos = cnv.position();
-  uiWrap.position(pos.x + SIM_PANEL_W + 12, pos.y + 12);
-
-  // Top bar (botonera)
-  uiTopBar = createDiv().parent(uiWrap)
-                        .style('display','flex')
-                        .style('gap','8px')
-                        .style('align-items','center')
-                        .style('margin-bottom','8px');
-
-  crearBoton('⏯ Pausar/Reanudar', () => simulacionPausada = !simulacionPausada, uiTopBar);
-  crearBoton('↻ Reiniciar', () => reiniciarSimulacion(), uiTopBar);
-  crearBoton('🧹 Limpiar gráfica', () => historialDatos = [], uiTopBar);
-
-  // Info fija (radio, g, r) — solo lectura
-  const info = createSpan(`Radio: ${RADIO_CM.toFixed(1)} cm · g: ${G_CM_S2.toFixed(0)} cm/s² · r: ${R_COR.toFixed(2)}`);
-  info.parent(uiTopBar).style('margin-left','auto').style('opacity','.8');
-
-  // Sliders (solo alturas)
-  uiSliders = createDiv().parent(uiWrap).style('display','grid').style('gap','6px');
-
-  ui.alturaSim = crearSliderLabeled(
-    'Altura simulación (cm)', 40, 200, alturaSimulacion_cm, 1, v => {
-      alturaSimulacion_cm = v;
-      // ajustar partida si quedó fuera
-      alturaDePartida_cm = constrain(alturaDePartida_cm, 0, alturaSimulacion_cm - 2*RADIO_CM);
-      recalcularEscala();
-    }
-  );
-
-  ui.altura0 = crearSliderLabeled(
-    'Altura de partida (cm)', 0, () => alturaSimulacion_cm - 2*RADIO_CM, alturaDePartida_cm, 1, v => {
-      alturaDePartida_cm = constrain(v, 0, max(0, alturaSimulacion_cm - 2*RADIO_CM));
-      y_cm = alturaDePartida_cm;
-    }
-  );
+// -------- SETUP --------
+function setup(){
+  createCanvas(900, 560);
+  layout();
+  initButtons();
+  groundY = panelSim.y + panelSim.h - 10;
+  resetSim();
 }
 
-// ===================== UTILIDADES UI =====================
-function crearBoton(txt, onClick, parent) {
-  const b = createButton(txt).parent(parent);
-  b.style('padding','6px 10px')
-   .style('border','1px solid #ccc')
-   .style('border-radius','8px')
-   .style('background','#f5f5f5')
-   .mousePressed(onClick);
-  return b;
+// -------- Layout gráfico --------
+function layout(){
+  topBar   = rectObj(PAD, PAD, width-2*PAD, 60);
+  const wPanel = (width - 3*PAD);
+  const hPanel = height - topBar.h - 3*PAD;
+  const wLeft  = int(wPanel * 0.55);
+  panelSim  = rectObj(PAD, topBar.y+topBar.h+PAD, wLeft, hPanel);
+  panelPlot = rectObj(panelSim.x+panelSim.w+PAD, panelSim.y, width - (panelSim.x+panelSim.w+2*PAD), hPanel);
 }
 
-function crearSliderLabeled(label, min, max, value, step, oninput) {
-  const wrap = createDiv().parent(uiSliders);
-  const lab  = createElement('label', label).parent(wrap).style('display','block');
-  const s = createSlider(
-    typeof min === 'function' ? min() : min,
-    typeof max === 'function' ? max() : max,
-    value, step
-  ).parent(wrap).style('width','100%');
-  const out = createSpan(String(value)).parent(wrap).style('float','right').style('opacity','.7');
+// -------- Botones --------
+function initButtons(){
+  const bw = 46;
+  const bh = topBar.h - 20;
+  const gap = 14;
+  const groupW = 4*bw + 3*gap;
 
-  s.input(() => {
-    if (typeof max === 'function') s.elt.max = max();
-    const v = Number(s.value());
-    out.html(v.toFixed(0));
-    oninput(v);
-  });
-  return s;
+  let bx = topBar.x + (topBar.w - groupW)/2;
+  let by = topBar.y + (topBar.h - bh)/2;
+
+  btnPlayPause = buttonObj(bx, by, bw, bh, "playpause");
+  bx += bw + gap;
+  btnReset     = buttonObj(bx, by, bw, bh, "reset");
+  bx += bw + gap;
+  btnRUp       = buttonObj(bx, by, bw, bh, "rup");
+  bx += bw + gap;
+  btnRDown     = buttonObj(bx, by, bw, bh, "rdown");
 }
 
-// ===================== SIM CORE =====================
-function recalcularEscala() {
-  pxPorCM = H / alturaSimulacion_cm;
-  radio_px = RADIO_CM * pxPorCM;
+// -------- Reset Física --------
+function resetSim(){
+  ball.x = panelSim.x + panelSim.w * 0.30;
+  ball.y = yFromMeters(h0);
+  ball.vy = 0;
+  running = false;
+  lastMS = millis();
+  tNow = 0;
+  idx = 0;
+  tbuf.fill(-1);
+  hbuf.fill(0);
+  maxHSeen = h0;
+  bounceCount = 0;
+  prevVy = 0;
+  peakHeights = [];
+  rEst = null;
 }
 
-function reiniciarSimulacion() {
-  y_cm = constrain(alturaDePartida_cm, 0, max(0, alturaSimulacion_cm - 2*RADIO_CM));
-  vy_cm_s = 0;
-  tiempoSimulado_s = 0;
-  historialDatos = [];
-  simulacionPausada = false;
-}
+// -------- DRAW --------
+function draw(){
+  background(250);
 
-// ===================== LOOP =====================
-function draw() {
-  if (!simulacionPausada) stepFisica();
-  dibujarSimulacion();
-  dibujarGrafica();
-  mostrarTextoPanel();
-}
+  // dt crudo (tiempo real del sistema)
+  let now = millis();
+  let dt = constrain((now - lastMS)/1000, 0, 0.05);
+  lastMS = now;
 
-function keyPressed() {
-  if (key === 'p' || key === 'P') simulacionPausada = !simulacionPausada;
-  if (key === 'r' || key === 'R') reiniciarSimulacion();
-}
+  // Física y tiempo de simulación SOLO si está corriendo
+  if (running) {
+    stepPhysics(dt);
+    tNow += dt;  // ← el tiempo solo avanza en PLAY
 
-// ===================== FÍSICA =====================
-function stepFisica() {
-  const dt = min(0.05, deltaTime / 1000); // s
-
-  // Convención: y_cm es altura desde el suelo; arriba positivo
-  vy_cm_s -= G_CM_S2 * dt;      // gravedad hacia abajo
-  y_cm += vy_cm_s * dt;
-
-  // Choque con suelo
-  if (y_cm <= 0) {
-    y_cm = 0;
-    vy_cm_s = -vy_cm_s * R_COR;
-    if (abs(vy_cm_s) < 5) { vy_cm_s = 0; simulacionPausada = true; } // reposo práctico
+    let hRun = metersFromPixels(groundY - (ball.y + metersToPixels(radio)));
+    pushSample(tNow, max(0, hRun));
   }
 
-  // Techo (para mantener dentro del mundo visible)
-  const yMax = max(0, alturaSimulacion_cm - 2*RADIO_CM);
-  if (y_cm > yMax) { y_cm = yMax; vy_cm_s = 0; }
+  // altura instantánea solo para mostrar (no altera el tiempo)
+  let h = metersFromPixels(groundY - (ball.y + metersToPixels(radio)));
 
-  tiempoSimulado_s += dt;
-  historialDatos.push({ t: tiempoSimulado_s, h: y_cm });
+  // UI
+  drawTopBar(h);    // info numérica en la barra superior
+  drawSimPanel();
+  drawPlotPanel();
 }
 
-// ===================== DIBUJO: SIMULACIÓN =====================
-function dibujarSimulacion() {
-  // Panel izquierdo
-  noStroke(); fill(200,230,255); rect(0,0,SIM_PANEL_W,H);
+// -------- Barra superior (título + botones + datos) --------
+function drawTopBar(hCurrent){
+  noStroke();
+  fill(255);
+  rect(topBar.x, topBar.y, topBar.w, topBar.h, 18);
 
-  // Referencias cada 10 cm
-  stroke(150,150,150,100); strokeWeight(1);
-  for (let h=10; h<alturaSimulacion_cm; h+=10){
-    const y = H - 5 - h*pxPorCM;
-    line(0,y,SIM_PANEL_W,y);
-    noStroke(); fill(100); textSize(12); textAlign(LEFT,BOTTOM);
-    text(h+' cm',10,y-2);
-    stroke(150,150,150,100);
-  }
+  // título a la izquierda
+  fill(0,150);
+  textAlign(LEFT, CENTER);
+  textSize(13);
+  text("Rebote inelástico · ping-pong", topBar.x + 20, topBar.y + topBar.h/2);
 
-  // Suelo
-  noStroke(); fill(100,150,50); rect(0,H-5,SIM_PANEL_W,5);
+  // botones centrados
+  drawButton(btnPlayPause);
+  drawButton(btnReset);
+  drawButton(btnRUp);
+  drawButton(btnRDown);
 
-  // Pelota
-  const sueloYpx = H - 5;
-  const cy = sueloYpx - (y_cm + RADIO_CM)*pxPorCM; // centro
-  const cx = SIM_PANEL_W/2;
-  fill(255); stroke(0); strokeWeight(1); ellipse(cx, cy, radio_px, radio_px);
+  // tira de datos a la derecha
+  let rEstText = (rEst === null ? "—" : nf(rEst,1,3));
+
+  let info = "t=" + nf(tNow,1,2) + " s   " +
+             "h=" + nf(hCurrent,1,3) + " m   " +
+             "vᵧ=" + nf(ball.vy,1,2) + " m/s   " +
+             "reb=" + bounceCount + "   " +
+             "r=" + nf(r,1,2) + "   " +
+             "rₑxp≈" + rEstText;
+
+  fill(0,170);
+  textSize(11);
+  textAlign(RIGHT, CENTER);
+  text(info, topBar.x + topBar.w - 20, topBar.y + topBar.h/2 + 1);
 }
 
-function mostrarTextoPanel() {
-  fill(50); noStroke(); textAlign(LEFT,TOP); textSize(14);
-  text('[R] Reiniciar',10,20);
-  text('[P] Pausar',10,40);
-  text('Tiempo: ' + tiempoSimulado_s.toFixed(2) + ' s', 10, 70);
-  text('Altura: ' + max(0,y_cm).toFixed(1) + ' cm', 10, 90);
+// -------- Panel Simulación --------
+function drawSimPanel(){
+  noStroke(); fill(255);
+  rect(panelSim.x, panelSim.y, panelSim.w, panelSim.h, 18);
 
-  if (simulacionPausada){
-    fill(255,0,0,200); textAlign(CENTER,CENTER); textSize(40);
-    text('PAUSADO', SIM_PANEL_W/2, H/2); textSize(16);
-  }
+  stroke(225);
+  line(panelSim.x+10, groundY, panelSim.x+panelSim.w-10, groundY);
+
+  // sombra
+  let rpx = metersToPixels(radio);
+  let dist = max(0, groundY - (ball.y + rpx));
+  let s = map(dist, 0, 240, 1.6, 0.25);
+  noStroke(); fill(0,30);
+  ellipse(ball.x + 10, groundY + 6, rpx*2.2*s, rpx*0.9*s);
+
+  // pelota
+  stroke(40); fill(255,180,0);
+  ellipse(ball.x, ball.y, rpx*2, rpx*2);
+  noFill(); stroke(255,255,255,150);
+  arc(ball.x, ball.y, rpx*1.6, rpx*1.6, -PI/6, PI/2);
 }
 
-// ===================== DIBUJO: GRÁFICA =====================
-function dibujarGrafica() {
-  // Panel derecho
-  fill(255); noStroke(); rect(SIM_PANEL_W,0,GRAPH_PANEL_W,H);
+// -------- Panel del Gráfico --------
+function drawPlotPanel(){
+  noStroke(); fill(255);
+  rect(panelPlot.x, panelPlot.y, panelPlot.w, panelPlot.h, 18);
 
-  const x1 = SIM_PANEL_W + 50, y1 = 50, x2 = W - 50, y2 = H - 50;
+  let left = panelPlot.x + 50;
+  let right = panelPlot.x + panelPlot.w - 16;
+  let bottom = panelPlot.y + panelPlot.h - 28;
+  let top = panelPlot.y + 16;
 
-  // Ejes
-  stroke(0); strokeWeight(2);
-  line(x1,y1,x1,y2); line(x1,y2,x2,y2);
+  stroke(230);
+  for (let y=bottom; y>=top; y-=40) line(left, y, right, y);
+  for (let x=left; x<=right; x+=60) line(x, top, x, bottom);
 
-  // Etiquetas
-  noStroke(); fill(0); textSize(14); textAlign(CENTER,CENTER);
-  text('Tiempo (s)', (x1+x2)/2, y2+30);
-  push(); translate(x1-35,(y1+y2)/2); rotate(-HALF_PI); text('Altura (cm)',0,0); pop();
+  stroke(30); strokeWeight(1.2);
+  line(left, top, left, bottom);
+  line(left, bottom, right, bottom);
+  strokeWeight(1);
 
-  // Marcas Y cada 20 cm
-  textAlign(RIGHT,CENTER); textSize(12);
-  for (let h=0; h<=alturaSimulacion_cm; h+=20){
-    const yy = map(h,0,alturaSimulacion_cm,y2,y1);
-    noStroke(); fill(0); text(h.toFixed(0), x1-5, yy);
-    stroke(220); line(x1,yy,x2,yy);
-  }
+  fill(0); noStroke();
+  textAlign(CENTER, TOP); text("x: tiempo (s)", (left+right)/2, bottom+6);
 
-  // Ventana X deslizante
-  const minT = max(0, tiempoSimulado_s - ventanaTiempo_s);
-  const maxT = minT + ventanaTiempo_s;
-  textAlign(CENTER,TOP);
-  for (let t = ceil(minT); t <= maxT; t += 1){
-    const xx = map(t, minT, maxT, x1, x2);
-    noStroke(); fill(0); text(t.toFixed(0), xx, y2+5);
-    stroke(220); line(xx,y1,xx,y2);
-  }
+  push();
+  translate(left-30, (top+bottom)/2);
+  rotate(-HALF_PI);
+  textAlign(CENTER, CENTER);
+  text("y: h (m)", 0, 0);
+  pop();
 
-  // Serie
-  if (historialDatos.length < 2) return;
-  noFill(); stroke(255,0,0); strokeWeight(2);
+  // escala vertical suave
+  let hmax = 0.1;
+  for (let i=0;i<N;i++) hmax = max(hmax, hbuf[i]);
+  maxHSeen = lerp(maxHSeen, max(hmax, 0.2), 0.08);
+  let yscale = (bottom - top) / max(0.15, maxHSeen*1.15);
+
+  noFill(); stroke(0);
   beginShape();
-  for (const p of historialDatos){
-    if (p.t >= minT){
-      const xx = map(p.t, minT, maxT, x1, x2);
-      const yy = map(p.h, 0, alturaSimulacion_cm, y2, y1);
-      vertex(xx, yy);
-    }
+  for (let k=0;k<N;k++){
+    let i = (idx + k) % N;
+    if (tbuf[i] < 0) continue;
+    let tx = map(tbuf[i], tNow - plotTWindow, tNow, left, right);
+    if (tx < left) continue;
+    if (tx > right) break;
+    let ty = bottom - hbuf[i]*yscale;
+    vertex(tx, ty);
   }
   endShape();
+}
+
+// -------- Interacción --------
+function mousePressed(){
+  if (hit(btnPlayPause)) running = !running;
+  else if (hit(btnReset)) resetSim();
+  else if (hit(btnRUp))   r = constrain(r + 0.01, 0, 1);
+  else if (hit(btnRDown)) r = constrain(r - 0.01, 0, 1);
+}
+
+function keyPressed(){
+  if (key === ' ') running = !running;
+  else if (key === 'r' || key === 'R') resetSim();
+  else if (keyCode === UP_ARROW)   r = constrain(r + 0.01, 0, 1);
+  else if (keyCode === DOWN_ARROW) r = constrain(r - 0.01, 0, 1);
+}
+
+// -------- Física --------
+function stepPhysics(dt){
+  prevVy = ball.vy;
+
+  ball.vy += g * dt;
+  ball.y  += ball.vy * ppm * dt;
+
+  detectPeak();
+
+  let rpx = metersToPixels(radio);
+  if (ball.y + rpx >= groundY){
+    ball.y = groundY - rpx;
+    ball.vy = -r * ball.vy;
+    bounceCount++;
+  }
+}
+
+// Detecta pico y actualiza r_est
+function detectPeak(){
+  // vy<0 sube, vy>0 baja (eje y hacia abajo)
+  if (prevVy < 0 && ball.vy >= 0){
+    let h_peak = metersFromPixels(groundY - (ball.y + metersToPixels(radio)));
+    if (h_peak > 0.001){
+      peakHeights.push(h_peak);
+      if (peakHeights.length >= 2){
+        let n = peakHeights.length;
+        rEst = sqrt(peakHeights[n-1] / peakHeights[n-2]);
+      }
+    }
+  }
+}
+
+// -------- Utilidades --------
+function metersToPixels(m){ return m * ppm; }
+function metersFromPixels(px){ return px / ppm; }
+function yFromMeters(m){ return groundY - metersToPixels(m); }
+
+function pushSample(t, h){
+  tbuf[idx] = t;
+  hbuf[idx] = h;
+  idx = (idx + 1) % N;
+}
+
+function rectObj(x,y,w,h){ return {x,y,w,h}; }
+function buttonObj(x,y,w,h,kind){ return {x,y,w,h,kind}; }
+function hit(b){ return mouseX>=b.x && mouseX<=b.x+b.w && mouseY>=b.y && mouseY<=b.y+b.h; }
+
+// -------- Dibujo de botones --------
+function drawButton(b){
+  let over = hit(b);
+
+  noStroke();
+  fill(0, 18);
+  rect(b.x, b.y+2, b.w, b.h, 14);
+
+  if (b.kind === "playpause" && running) {
+    fill(over ? 230 : 236);
+  } else {
+    fill(over ? 242 : 250);
+  }
+  rect(b.x, b.y, b.w, b.h, 14);
+
+  noFill();
+  stroke(220);
+  rect(b.x, b.y, b.w, b.h, 14);
+
+  push();
+  translate(b.x + b.w/2, b.y + b.h/2);
+  stroke(20); strokeWeight(2); noFill();
+
+  if (b.kind === "playpause"){
+    if (running){
+      line(-6,-10,-6,10);
+      line(6,-10,6,10);
+    } else {
+      noStroke(); fill(20);
+      triangle(-6,-12,-6,12,10,0);
+    }
+  } else if (b.kind === "reset"){
+    noFill(); stroke(20);
+    arc(0,0,20,20, PI*0.2, TWO_PI*0.85);
+    line(8,-2,12,-6);
+    line(8,-2,13,1);
+  } else if (b.kind === "rup"){
+    line(0,-10,0,10);
+    line(0,-10,-6,-2);
+    line(0,-10,6,-2);
+  } else if (b.kind === "rdown"){
+    line(0,-10,0,10);
+    line(0,10,-6,2);
+    line(0,10,6,2);
+  }
+  pop();
 }
